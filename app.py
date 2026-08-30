@@ -407,12 +407,19 @@ def main():
         st.caption("每个客户的AI记忆体")
 
         # 新建客户
+        if "new_customer_key_version" not in st.session_state:
+            st.session_state.new_customer_key_version = 0
         new_customer = st.text_input(
-            "➕ 新建客户", placeholder="输入客户名称，回车创建"
+            "➕ 新建客户",
+            placeholder="输入客户名称，回车创建",
+            key=f"new_customer_input_{st.session_state.new_customer_key_version}",
         )
         if new_customer and new_customer not in st.session_state.customers:
             get_customer_data(new_customer)
             st.session_state.current_customer = new_customer
+            # 换一个新 key，强制输入框在下一次渲染时清空
+            # 否则残留的文本在删除该客户后会被这段逻辑当作"新客户"重新创建出来
+            st.session_state.new_customer_key_version += 1
             st.rerun()
 
         st.divider()
@@ -475,7 +482,8 @@ def main():
     st.caption("支持 JPG/PNG/PDF/DOCX/TXT 格式，可多选")
     uploaded_files = st.file_uploader(
         "📎 上传客户材料",
-        type=SUPPORTED_EXTENSIONS,
+        # 不通过 type= 限制格式：Streamlit 组件自身对不支持类型的拦截提示是英文且无法定制，
+        # 交给下面 handle_uploaded_files() 里的中文提示统一处理，保证界面全中文
         accept_multiple_files=True,
         key=f"file_uploader_{st.session_state.current_customer}",
     )
