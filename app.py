@@ -42,11 +42,13 @@ SYSTEM_PROMPT = """你是"客迹AI"，一位专业的客户信息管理助手。
 - 不确定的不编造
 """
 
-CUSTOMER_WELCOME_MESSAGE = (
-    "我是这位客户的专属记忆体，上传沟通材料或直接提问吧。"
-)
-
 SUPPORTED_EXTENSIONS = ["jpg", "jpeg", "png", "pdf", "docx", "txt"]
+
+SUGGESTED_QUESTIONS = [
+    "这个客户目前最大的风险是什么？",
+    "帮我准备下次会议要点",
+    "还有哪些信息需要补充？",
+]
 
 MAX_MESSAGES = 40
 KEEP_RECENT_MESSAGES = 30
@@ -186,61 +188,75 @@ def render_profile(profile):
         st.sidebar.caption("上传客户材料后，档案将自动生成")
         return
 
-    st.sidebar.subheader(profile.get("customer_name") or "未命名客户")
+    st.sidebar.markdown(f"### 📇 {profile.get('customer_name') or '未命名客户'}")
+    st.sidebar.divider()
 
     needs = profile.get("core_needs") or []
     if needs:
         st.sidebar.markdown("**📋 核心需求**")
         for n in needs:
-            st.sidebar.markdown(f"- {n}")
+            st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {n}")
+        st.sidebar.markdown("")
 
     makers = profile.get("decision_makers") or []
     if makers:
         st.sidebar.markdown("**👤 决策人**")
         for m in makers:
-            if isinstance(m, dict):
-                st.sidebar.markdown(f"- {m.get('name', '')}（{m.get('role', '')}）")
+            name = m.get("name", "") if isinstance(m, dict) else str(m)
+            role = m.get("role", "") if isinstance(m, dict) else ""
+            if role:
+                st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• **{name}**（{role}）")
             else:
-                st.sidebar.markdown(f"- {m}")
+                st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {name}")
+        st.sidebar.markdown("")
 
     budget = profile.get("budget") or ""
     if budget:
         st.sidebar.markdown("**💰 预算与商务**")
-        st.sidebar.markdown(budget)
+        st.sidebar.info(budget)
 
     timeline = profile.get("timeline") or []
     if timeline:
         st.sidebar.markdown("**📅 时间线**")
         for t in timeline:
             if isinstance(t, dict):
-                st.sidebar.markdown(f"- {t.get('date', '')}: {t.get('event', '')}")
+                st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;📌 {t.get('date', '')}: {t.get('event', '')}")
             else:
-                st.sidebar.markdown(f"- {t}")
+                st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;📌 {t}")
+        st.sidebar.markdown("")
 
     confirmed = profile.get("confirmed_items") or []
     if confirmed:
         st.sidebar.markdown("**✅ 已确认事项**")
         for c in confirmed:
-            st.sidebar.markdown(f"- {c}")
+            st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {c}")
+        st.sidebar.markdown("")
 
     actions = profile.get("action_items") or []
     if actions:
         st.sidebar.markdown("**⚠️ 待办与风险**")
         for a in actions:
-            if isinstance(a, str):
-                item = a
+            if isinstance(a, dict):
+                priority = a.get("priority", "")
+                item_text = a.get("item", "")
+                if "高" in str(priority):
+                    st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;🔴 **{item_text}**（{priority}）")
+                elif "中" in str(priority):
+                    st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;🟡 {item_text}（{priority}）")
+                else:
+                    st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;🟢 {item_text}（{priority}）")
             else:
-                item = f"{a.get('item', '')}（{a.get('priority', '')}）"
-            st.sidebar.markdown(f"- {item}")
+                st.sidebar.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {a}")
+        st.sidebar.markdown("")
 
     updates = profile.get("recent_updates") or []
     if updates:
         st.sidebar.markdown("**📝 最近更新**")
         for u in updates[-3:]:
             if isinstance(u, dict):
-                st.sidebar.markdown(f"- [{u.get('date', '')}] {u.get('summary', '')}")
+                st.sidebar.caption(f"[{u.get('date', '')}] {u.get('summary', '')}")
             else:
-                st.sidebar.markdown(f"- {u}")
+                st.sidebar.caption(str(u))
 
 
 # ============================================================
@@ -394,6 +410,138 @@ def run_assistant_turn(customer_data):
 
 
 # ============================================================
+# 推荐追问
+# ============================================================
+
+def render_suggested_questions(customer_data):
+    """在最新一条 Agent 回复下方展示可点击的推荐追问"""
+    if not customer_data.get("profile"):
+        return
+    if not customer_data["chat_display"]:
+        return
+    if customer_data["chat_display"][-1]["role"] != "assistant":
+        return
+
+    st.markdown("---")
+    st.caption("💡 你可以继续问我：")
+    cols = st.columns(len(SUGGESTED_QUESTIONS))
+    for i, suggestion in enumerate(SUGGESTED_QUESTIONS):
+        with cols[i]:
+            if st.button(
+                suggestion,
+                key=f"suggest_{len(customer_data['messages'])}_{i}",
+                use_container_width=True,
+            ):
+                customer_data["chat_display"].append(
+                    {"role": "user", "content": suggestion}
+                )
+                customer_data["messages"].append(
+                    {"role": "user", "content": suggestion}
+                )
+                run_assistant_turn(customer_data)
+                st.rerun()
+
+
+# ============================================================
+# 演示数据（用于快速展示效果）
+# ============================================================
+
+def load_demo_customer():
+    """预置一个"演示客户-华为云"，供演示或 API 不可用时快速展示效果"""
+    demo_name = "演示客户-华为云"
+    demo_file_name = "华为云项目会议纪要.pdf"
+    demo_material = (
+        "# 华为云智能文档处理平台项目 - 第二轮需求沟通会议纪要\n\n"
+        "**日期**：2026年8月25日\n"
+        "**参会人**：张明远（华为云产品总监）、李薇（采购负责人）、王建国（IT部门主管）\n\n"
+        "## 核心需求\n"
+        "- 需要一套智能文档处理平台，支持合同、发票、报告等多类型文档的自动识别和结构化提取\n"
+        "- 日均处理量预计5000-8000份文档\n"
+        "- 需要与现有OA系统对接\n\n"
+        "## 预算\n"
+        "- 初步预算100万/年，含平台授权+技术支持\n"
+        "- 李薇提到如果一期效果好，二期预算可以追加到200万\n\n"
+        "## 时间线\n"
+        "- 9月中旬前需要完成POC验证\n"
+        "- 10月底前完成一期上线\n"
+        "- 张明远强调：集团年底有数字化考核指标，时间比较紧\n\n"
+        "## 待确认事项\n"
+        "- IT部门需要评估API并发能力\n"
+        "- 安全合规审查流程大约需要2-3周"
+    )
+    demo_reply = (
+        "收到华为云项目的会议纪要，我已提取以下关键信息：\n\n"
+        "**📋 核心需求**\n"
+        "- 智能文档处理平台：支持合同、发票、报告等多类型文档自动识别和结构化提取\n"
+        "- 日均处理量：5000-8000份\n"
+        "- 系统集成：需要与现有OA系统对接\n\n"
+        "**👤 决策人与关键联系人**\n"
+        "- **张明远**（产品总监）：核心决策人，关注时间进度，有年底数字化考核压力\n"
+        "- **李薇**（采购负责人）：管预算，对效果有信心则愿追加\n"
+        "- **王建国**（IT部门主管）：技术把关，需评估API并发能力\n\n"
+        "**💰 预算**\n"
+        "- 一期：100万/年（含平台授权+技术支持）\n"
+        "- 二期：可追加至200万（取决于一期效果）\n\n"
+        "**📅 关键时间节点**\n"
+        "- 9月中旬：完成POC验证\n"
+        "- 10月底：一期上线\n"
+        "- ⚠️ 年底前有集团数字化考核指标，时间紧迫\n\n"
+        "**⚠️ 待办与风险**\n"
+        "- 🔴 IT部门API并发能力评估（影响技术方案）\n"
+        "- 🟡 安全合规审查（预计2-3周，可能影响时间线）\n"
+        "- 🔴 9月中旬POC验证时间紧，距今不到3周"
+    )
+
+    st.session_state.customers[demo_name] = {
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"我上传了一份客户材料：{demo_file_name}\n\n以下是解析出的内容：\n{demo_material}",
+            },
+            {"role": "assistant", "content": demo_reply},
+        ],
+        "profile": {
+            "customer_name": "华为云",
+            "core_needs": [
+                "智能文档处理平台，支持合同/发票/报告等多类型文档自动识别与结构化提取",
+                "日均处理量5000-8000份文档",
+                "与现有OA系统对接",
+            ],
+            "decision_makers": [
+                {"name": "张明远", "role": "产品总监，核心决策人"},
+                {"name": "李薇", "role": "采购负责人"},
+                {"name": "王建国", "role": "IT部门主管，技术把关"},
+            ],
+            "budget": "一期100万/年（含授权+技术支持），二期可追加至200万",
+            "timeline": [
+                {"date": "2026年9月中旬", "event": "完成POC验证"},
+                {"date": "2026年10月底", "event": "一期上线"},
+                {"date": "2026年底", "event": "集团数字化考核节点"},
+            ],
+            "confirmed_items": [
+                "文档类型范围：合同、发票、报告",
+                "对接方式：API集成到现有OA系统",
+            ],
+            "action_items": [
+                {"item": "POC验证方案准备（距9月中旬不到3周）", "priority": "高"},
+                {"item": "IT部门API并发能力评估", "priority": "高"},
+                {"item": "安全合规审查启动（预计2-3周）", "priority": "中"},
+            ],
+            "recent_updates": [
+                {"date": "2026-08-25", "summary": "第二轮需求沟通完成，明确预算100万/年，时间节点9月中旬POC"},
+            ],
+        },
+        "chat_display": [
+            {"role": "user", "content": f"📎 上传了文件：{demo_file_name}"},
+            {"role": "assistant", "content": demo_reply},
+        ],
+        "processed_file_keys": set(),
+    }
+    st.session_state.current_customer = demo_name
+
+
+# ============================================================
 # 主程序
 # ============================================================
 
@@ -462,22 +610,42 @@ def main():
         else:
             st.caption("上传客户材料后，档案将自动生成")
 
+        st.divider()
+        if st.button("📥 加载演示数据", use_container_width=True):
+            load_demo_customer()
+            st.rerun()
+
     # ---------------- 主区域 ----------------
     if not st.session_state.current_customer:
-        st.info("👈 请在左侧创建或选择一个客户开始")
+        st.markdown("### 👋 欢迎使用客迹 AI")
+        st.info(
+            "**三步开始使用：**\n\n"
+            "1️⃣ 在左侧输入客户名称，创建客户\n\n"
+            "2️⃣ 上传客户沟通材料（截图、PDF、Word等）\n\n"
+            "3️⃣ AI 自动分析并建立客户档案，你可以随时提问"
+        )
         return
 
     customer_data = current_customer_data
     st.markdown(f"### 💬 {st.session_state.current_customer}")
 
     # 首次进入该客户时显示欢迎语
+    # 用 chat_display 是否为空判断，而不是 messages 长度：
+    # 上传不支持格式/空文件时只会写入 chat_display（不会调用模型追加 messages），
+    # 若按 messages 长度判断，这类中文提示会被下面的欢迎语覆盖、用户看不到
     if not customer_data["chat_display"]:
         with st.chat_message("assistant"):
-            st.markdown(CUSTOMER_WELCOME_MESSAGE)
+            st.markdown(
+                f"我是 **{st.session_state.current_customer}** 的专属记忆体 🧠\n\n"
+                f"上传这位客户的沟通材料（微信截图、会议纪要、需求文档等），"
+                f"我会自动提取关键信息并建立客户档案。\n\n"
+                f"你也可以直接问我关于这位客户的任何问题。"
+            )
     else:
         for msg in customer_data["chat_display"]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+        render_suggested_questions(customer_data)
 
     st.caption("支持 JPG/PNG/PDF/DOCX/TXT 格式，可多选")
     uploaded_files = st.file_uploader(
