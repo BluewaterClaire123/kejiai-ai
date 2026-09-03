@@ -1,9 +1,13 @@
 """客迹AI - 客户信息管理 AI Agent (Streamlit 应用)"""
 
+import hashlib
+import io
 import json
 
 import requests
+import speech_recognition as sr
 import streamlit as st
+from audio_recorder_streamlit import audio_recorder
 from openai import OpenAI
 
 # ============================================================
@@ -280,6 +284,7 @@ def get_customer_data(name):
             "profile": None,
             "chat_display": [],  # 仅用于界面展示，不进入模型上下文
             "processed_file_keys": set(),
+            "last_voice_hash": None,  # 防止同一段录音在 rerun 时被重复处理
         }
     return st.session_state.customers[name]
 
@@ -410,6 +415,64 @@ def run_assistant_turn(customer_data):
 
 
 # ============================================================
+# 语音备忘
+# ============================================================
+
+def handle_voice_input(customer_data, audio_bytes):
+    """
+    将录音转成文字，作为用户消息交给 Agent 处理（与手动打字输入走同一流程）。
+    audio_recorder 组件在被读取后仍会持续返回上一段录音的字节，
+    所以用内容哈希去重，避免同一段录音在每次 rerun 时被反复当成新消息处理。
+    """
+    audio_hash = hashlib.md5(audio_bytes).hexdigest()
+    if audio_hash == customer_data.get("last_voice_hash"):
+        return False
+    customer_data["last_voice_hash"] = audio_hash
+
+    def fail(message):
+        # 失败提示也写入 chat_display，否则后面为了刷新档案卡触发的
+        # st.rerun() 会让这条提示一闪而过，用户根本看不到
+        customer_data["chat_display"].append({"role": "assistant", "content": message})
+        with st.chat_message("assistant"):
+            st.markdown(message)
+
+    recognizer = sr.Recognizer()
+    try:
+        with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
+            audio_data = recognizer.record(source)
+    except Exception:
+        fail("语音文件解析失败，请重新录制")
+        return True
+
+    try:
+        text = recognizer.recognize_google(audio_data, language="zh-CN")
+    except sr.UnknownValueError:
+        fail("没有识别到语音内容，请重新录制")
+        return True
+    except sr.RequestError:
+        fail("语音识别服务暂时不可用，请直接输入文字")
+        return True
+    except Exception:
+        fail("语音识别出错，请直接输入文字")
+        return True
+
+    if not text or not text.strip():
+        fail("没有识别到语音内容，请重新录制")
+        return True
+
+    st.success(f"识别结果：{text}")
+
+    user_message = f"我刚见完客户，以下是沟通要点：\n\n{text}"
+    customer_data["chat_display"].append({"role": "user", "content": user_message})
+    with st.chat_message("user"):
+        st.markdown(user_message)
+
+    customer_data["messages"].append({"role": "user", "content": user_message})
+    run_assistant_turn(customer_data)
+    return True
+
+
+# ============================================================
 # 推荐追问
 # ============================================================
 
@@ -537,6 +600,7 @@ def load_demo_customer():
             {"role": "assistant", "content": demo_reply},
         ],
         "processed_file_keys": set(),
+        "last_voice_hash": None,
     }
     st.session_state.current_customer = demo_name
 
@@ -605,6 +669,7 @@ def main():
                     "profile": None,
                     "chat_display": [],
                     "processed_file_keys": set(),
+                    "last_voice_hash": None,
                 }
                 st.rerun()
         else:
@@ -666,6 +731,24 @@ def main():
         if processed_any:
             # 重新运行一次，让侧边栏用上刚刚静默更新出的最新客户档案
             st.rerun()
+
+    st.markdown("---")
+    st.markdown("**🎤 语音备忘**")
+    st.caption("见完客户？录一段语音，我来记住关键信息")
+    audio_bytes = audio_recorder(
+        text="点击录音",
+        recording_color="#e8703a",
+        neutral_color="#6b7488",
+        icon_size="2x",
+        pause_threshold=2.0,  # 停顿2秒自动结束
+        key=f"voice_{st.session_state.current_customer}",
+    )
+    if audio_bytes:
+        processed_voice = handle_voice_input(customer_data, audio_bytes)
+        if processed_voice:
+            # 重新运行一次，让侧边栏用上刚刚静默更新出的最新客户档案
+            st.rerun()
+    st.markdown("---")
 
     user_input = st.chat_input("输入消息...")
     if user_input:
