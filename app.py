@@ -20,16 +20,18 @@ SYSTEM_PROMPT = """你是"客迹AI"，一位专业的客户信息管理助手。
 
 ### 当用户上传了新的客户沟通材料时：
 1. 仔细阅读全部内容，提取关键业务信息
-2. 将信息分类到六个维度：
-   - 核心需求：客户要解决什么问题、想要什么能力
-   - 决策人与关键联系人：谁拍板、谁对接、各自关注什么
-   - 预算与商务条件：金额、付款方式、采购流程
-   - 时间线与里程碑：关键节点、紧迫程度
-   - 已确认事项：双方已达成共识的决定
-   - 待办事项与风险：需跟进的事、风险信号
-3. 以清晰格式汇报提取到的新信息
-4. 如果新信息与已有信息冲突，明确标注变更（如"⚠️ 预算更新：由80万调整为50万"）
-5. 不确定的信息标注"待确认"
+2. 如果用户同时上传了多份材料，必须综合所有材料后统一输出分析结论，不要逐个文件分别分析
+3. 回复格式要求——先总结后展开：
+   - 首先给出「📋 总览」：用2-3句话概括这批材料的核心信息（是什么文件、涉及什么项目、最关键的几个数字）
+   - 然后按六个维度分类展开提取到的关键信息：
+     - 核心需求：客户要解决什么问题、想要什么能力
+     - 决策人与关键联系人：谁拍板、谁对接、各自关注什么
+     - 预算与商务条件：金额、付款方式、采购流程
+     - 时间线与里程碑：关键节点、紧迫程度
+     - 已确认事项：双方已达成共识的决定
+     - 待办事项与风险：需跟进的事、风险信号
+   - 最后列出「⚠️ 需要关注」：矛盾信息、风险点、待确认事项（如果新信息与已有信息冲突，明确标注变更，如"⚠️ 预算更新：由80万调整为50万"）
+4. 不确定的信息标注"待确认"
 
 ### 当用户提问时：
 - 基于所有已积累的信息回答，引用信息来源
@@ -56,6 +58,8 @@ SUGGESTED_QUESTIONS = [
 
 MAX_MESSAGES = 40
 KEEP_RECENT_MESSAGES = 30
+
+MAX_BATCH_CHARS = 50000  # 多文件合并后的字数上限，超过则提示分批上传
 
 
 # ============================================================
@@ -293,9 +297,22 @@ def get_customer_data(name):
 # 核心业务逻辑：处理上传的文件
 # ============================================================
 
+def _show_upload_notice(customer_data, text):
+    """把一条上传相关的提示同时显示在当前渲染中，并写入 chat_display 持久化
+    （后面为了刷新档案卡触发的 st.rerun() 会让纯 st.warning/st.error 一闪而过）"""
+    with st.chat_message("assistant"):
+        st.markdown(text)
+    customer_data["chat_display"].append({"role": "assistant", "content": text})
+
+
 def handle_uploaded_files(customer_data, uploaded_files, app_id, secret_code):
+    """批量处理上传的文件：全部解析完成后合并为一条消息，只调用一次 Agent，
+    避免上传多个文件时产生好几段互相独立、割裂的长回复"""
     processed_any = False
-    for uploaded_file in uploaded_files:
+    parsed_results = []  # [{"filename": ..., "content": ...}]
+    total = len(uploaded_files)
+
+    for idx, uploaded_file in enumerate(uploaded_files, start=1):
         file_key = f"{uploaded_file.name}-{uploaded_file.size}"
         if file_key in customer_data["processed_file_keys"]:
             continue
@@ -304,26 +321,30 @@ def handle_uploaded_files(customer_data, uploaded_files, app_id, secret_code):
 
         ext = uploaded_file.name.split(".")[-1].lower()
         if ext not in SUPPORTED_EXTENSIONS:
-            with st.chat_message("assistant"):
-                st.warning("目前支持 JPG/PNG/PDF/DOCX/TXT 格式")
-            customer_data["chat_display"].append(
-                {
-                    "role": "assistant",
-                    "content": "目前支持 JPG/PNG/PDF/DOCX/TXT 格式",
-                }
-            )
+            _show_upload_notice(customer_data, "目前支持 JPG/PNG/PDF/DOCX/TXT 格式")
             continue
 
         file_bytes = uploaded_file.read()
         if not file_bytes:
-            with st.chat_message("assistant"):
-                st.warning("文件内容为空，请检查后重新上传")
-            customer_data["chat_display"].append(
-                {
-                    "role": "assistant",
-                    "content": "文件内容为空，请检查后重新上传",
-                }
-            )
+            _show_upload_notice(customer_data, "文件内容为空，请检查后重新上传")
+            continue
+
+        # 纯文本文件直接读取，无需调用 TextIn
+        if ext == "txt":
+            try:
+                markdown_text = file_bytes.decode("utf-8", errors="ignore")
+            except Exception:
+                markdown_text = ""
+        else:
+            with st.spinner(f"正在解析第 {idx}/{total} 份文件：{uploaded_file.name} ..."):
+                try:
+                    markdown_text = parse_with_textin(file_bytes, app_id, secret_code)
+                except Exception:
+                    _show_upload_notice(customer_data, "文档解析暂时不可用，请稍后重试")
+                    continue
+
+        if not markdown_text or not markdown_text.strip():
+            _show_upload_notice(customer_data, "文件内容为空，请检查后重新上传")
             continue
 
         user_display_msg = f"📎 上传了文件：{uploaded_file.name}"
@@ -333,47 +354,40 @@ def handle_uploaded_files(customer_data, uploaded_files, app_id, secret_code):
         with st.chat_message("user"):
             st.markdown(user_display_msg)
 
-        # 纯文本文件直接读取，无需调用 TextIn
-        if ext == "txt":
-            try:
-                markdown_text = file_bytes.decode("utf-8", errors="ignore")
-            except Exception:
-                markdown_text = ""
-        else:
-            with st.chat_message("assistant"):
-                with st.spinner(f"正在解析文档 {uploaded_file.name} ..."):
-                    try:
-                        markdown_text = parse_with_textin(
-                            file_bytes, app_id, secret_code
-                        )
-                    except Exception:
-                        st.error("文档解析暂时不可用，请稍后重试")
-                        customer_data["chat_display"].append(
-                            {
-                                "role": "assistant",
-                                "content": "文档解析暂时不可用，请稍后重试",
-                            }
-                        )
-                        continue
+        parsed_results.append({"filename": uploaded_file.name, "content": markdown_text})
 
-        if not markdown_text or not markdown_text.strip():
-            with st.chat_message("assistant"):
-                st.warning("文件内容为空，请检查后重新上传")
-            customer_data["chat_display"].append(
-                {
-                    "role": "assistant",
-                    "content": "文件内容为空，请检查后重新上传",
-                }
-            )
-            continue
+    if not parsed_results:
+        return processed_any
 
+    if len(parsed_results) == 1:
+        # 单个文件：保持原有格式和体验不变
         user_message = (
-            f"我上传了一份客户材料：{uploaded_file.name}\n\n"
-            f"以下是解析出的内容：\n{markdown_text}"
+            f"我上传了一份客户材料：{parsed_results[0]['filename']}\n\n"
+            f"以下是解析出的内容：\n{parsed_results[0]['content']}"
         )
-        customer_data["messages"].append({"role": "user", "content": user_message})
+    else:
+        # 多个文件：合并为一条消息，一次性交给 Agent 综合分析
+        file_list = "、".join(r["filename"] for r in parsed_results)
+        combined_content = "".join(
+            f"\n\n---\n### 文件 {i}：{r['filename']}\n{r['content']}"
+            for i, r in enumerate(parsed_results, start=1)
+        )
+        user_message = (
+            f"我同时上传了 {len(parsed_results)} 份客户材料：{file_list}\n\n"
+            f"请综合分析所有材料后，给出统一的结论。"
+            f"以下是各文件解析出的内容：{combined_content}"
+        )
 
-        run_assistant_turn(customer_data)
+    if len(user_message) > MAX_BATCH_CHARS:
+        _show_upload_notice(
+            customer_data,
+            f"这批材料合并后约 {len(user_message)} 字，超出单次分析的长度上限，"
+            f"请分成几批、每批文件少一些再重新上传",
+        )
+        return processed_any
+
+    customer_data["messages"].append({"role": "user", "content": user_message})
+    run_assistant_turn(customer_data)
 
     return processed_any
 
